@@ -18,6 +18,7 @@ int capture_core(const struct core_capture_config * config) {
   struct rte_mbuf *bufs[DPDKCAP_CAPTURE_BURST_SIZE];
   uint16_t nb_rx;
   int nb_rx_enqueued;
+  int i;
 
   RTE_LOG(INFO, DPDKCAP, "Core %u is capturing packets for port %u\n",
       rte_lcore_id(), config->port);
@@ -41,21 +42,21 @@ int capture_core(const struct core_capture_config * config) {
         bufs, DPDKCAP_CAPTURE_BURST_SIZE);
     if (likely(nb_rx > 0)) {
 #if RTE_VERSION >= RTE_VERSION_NUM(17,5,0,16)
-      nb_rx_enqueued = rte_ring_enqueue_bulk(config->ring, (void*) bufs,
+      nb_rx_enqueued = rte_ring_enqueue_burst(config->ring, (void*) bufs,
           nb_rx, NULL);
 #else
-      nb_rx_enqueued = rte_ring_enqueue_bulk(config->ring, (void*) bufs,
+      nb_rx_enqueued = rte_ring_enqueue_burst(config->ring, (void*) bufs,
           nb_rx);
 #endif
 
       /* Update stats */
-      if(nb_rx_enqueued == 0 || nb_rx_enqueued == -EDQUOT) {
+      if(nb_rx_enqueued == nb_rx) {
         config->stats->packets+=nb_rx;
       } else {
         config->stats->missed_packets+=nb_rx;
         /* Free whatever we can't put in the write ring */
-        for (nb_rx_enqueued=0; nb_rx_enqueued < nb_rx; nb_rx_enqueued++) {
-          rte_pktmbuf_free(bufs[nb_rx_enqueued]);
+        for (i=nb_rx_enqueued; i < nb_rx; i++) {
+          rte_pktmbuf_free(bufs[i]);
         }
       }
     }

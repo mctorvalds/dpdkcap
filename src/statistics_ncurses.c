@@ -24,8 +24,10 @@ static void wglobal_stats(WINDOW * window, struct stats_data * data) {
     wprintw(window,"Writing logs to: %s\n", data->log_file);
   else
     wprintw(window,"Writing logs to stderr\n");
-  wprintw(window,"Entries free on ring: %u\n",
-      rte_ring_free_count(data->ring));
+  wprintw(window,"Entries free on ring1: %u\n",
+      rte_ring_free_count(data->ring1));
+  wprintw(window,"Entries free on ring2: %u\n",
+      rte_ring_free_count(data->ring2));    
 }
 
 static void wcapture_stats(WINDOW * window, struct stats_data * data) {

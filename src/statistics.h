@@ -5,7 +5,8 @@
 #include "core_capture.h"
 
 struct stats_data {
-  struct rte_ring * ring;
+  struct rte_ring * ring1;
+  struct rte_ring * ring2;
   struct core_write_stats * cores_stats_write_list;
   unsigned int cores_write_stats_list_size;
   struct core_capture_stats * cores_stats_capture_list;

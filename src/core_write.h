@@ -14,10 +14,11 @@ struct core_write_config {
   struct core_write_stats * stats;
   char * output_file_template;
   int no_compression;
-  bool use_pcapng;
-  uint32_t snaplen;
+  unsigned int snaplen;
   unsigned long rotate_seconds;
   uint64_t file_size_limit;
+  int port;
+  unsigned int pktlength;
 };
 
 /* Statistics structure */

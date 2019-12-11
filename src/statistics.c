@@ -42,7 +42,8 @@ static int print_stats(
       ROTATING_CHAR[nb_stat_update%4]);
 
   printf("-- GLOBAL --\n");
-  printf("Entries free on ring: %u\n", rte_ring_free_count(data->ring));
+  printf("Entries free on ring1: %u\n", rte_ring_free_count(data->ring1));
+  printf("Entries free on ring2: %u\n", rte_ring_free_count(data->ring2));
   printf("Total packets written: %lu\n", total_packets);
   printf("Total bytes written: %s ", bytes_format(total_bytes));
   printf("compressed to %s\n", bytes_format(total_compressedbytes));

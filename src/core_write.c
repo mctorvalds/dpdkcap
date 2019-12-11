@@ -14,7 +14,6 @@
 
 #include "lzo/lzowrite.h"
 #include "pcap.h"
-#include "pcapng.h"
 #include "utils.h"
 
 #include "core_write.h"
@@ -23,26 +22,29 @@
 
 #define RTE_LOGTYPE_DPDKCAP RTE_LOGTYPE_USER1
 
-#define DPDKCAP_PCAP_LINK_TYPE_ETHERNET 0x1
-
 /*
  * Change file name from template
  */
 static void format_from_template(
     char * filename,
     const char * template,
+    const int port_id,
     const int core_id,
     const int file_count,
     const struct timeval * file_start
     ) {
   char str_buf[DPDKCAP_OUTPUT_FILENAME_LENGTH];
+  //char str_real_buf[DPDKCAP_OUTPUT_FILENAME_LENGTH];
   //Change file name
   strncpy(filename, template,
       DPDKCAP_OUTPUT_FILENAME_LENGTH);
-  snprintf(str_buf, 50, "%02d", core_id);
-  while(str_replace(filename,"\%COREID",str_buf));
+  snprintf(str_buf, 50, "%01d", core_id);
+  //snprintf(str_real_buf, 50, "%01d", port_id);
+  while(str_replace(filename,"COREID",str_buf));
+  snprintf(str_buf, 50, "%01d", port_id);
+  while(str_replace(filename,"PORTID",str_buf));
   snprintf(str_buf, 50, "%03d", file_count);
-  while(str_replace(filename,"\%FCOUNT",str_buf));
+  while(str_replace(filename,"FCOUNT",str_buf));
   strncpy(str_buf, filename, DPDKCAP_OUTPUT_FILENAME_LENGTH);
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-nonliteral"
@@ -161,17 +163,9 @@ int write_core(const struct core_write_config * config) {
   int bytes_to_write;
   struct rte_mbuf * dequeued[DPDKCAP_WRITE_BURST_SIZE];
   struct rte_mbuf * bufptr;
+  struct pcap_packet_header header;
   struct timeval tv;
-  uint64_t tv64;
-
-  struct pcap_packet_header pcap_pkt_header;
-  struct pcap_header pcap_file_header;
-
-  struct pcapng_section_header_block pcapng_file_header;
-  struct pcapng_enhanced_packet_block pcapng_pkt_header;
-  struct pcapng_interface_description_block pcapng_interface_desc_block;
-  char padding_char[4] = {0, 0, 0, 0};
-
+  struct pcap_header pcp;
   int retval = 0;
   int written;
   void * (*file_open_func)(char*);
@@ -182,6 +176,7 @@ int write_core(const struct core_write_config * config) {
   unsigned int file_count = 0;
   uint64_t file_size = 0;
   struct timeval file_start;
+  unsigned int pkt_strip_len=config->pktlength;
 
   if(config->no_compression) {
     file_open_func  = (void*(*)(char*)) open_pcap;
@@ -196,7 +191,7 @@ int write_core(const struct core_write_config * config) {
 
   //Update filename
   format_from_template(file_name, config->output_file_template,
-      rte_lcore_id(), file_count, &file_start);
+      config->port, rte_lcore_id(), file_count, &file_start);
 
   //Init stats
   *(config->stats) = (struct core_write_stats) {
@@ -211,6 +206,9 @@ int write_core(const struct core_write_config * config) {
   memcpy(config->stats->output_file, file_name,
       DPDKCAP_OUTPUT_FILENAME_LENGTH);
 
+  //Init the common pcap header
+  pcap_header_init(&pcp, config->snaplen);
+
   //Open new file
   write_buffer = file_open_func(file_name);
   if(unlikely(!write_buffer)) {
@@ -218,85 +216,13 @@ int write_core(const struct core_write_config * config) {
     goto cleanup;
   }
 
-  if(config->use_pcapng) {
-    //Init the common pcapng header
-    pcapng_file_header.header.type         = PCAPNG_SHB_BLOCK_TYPE;
-    pcapng_file_header.header.block_length =
-      sizeof(struct pcapng_section_header_block) + sizeof(uint32_t);
-    pcapng_file_header.byte_order_magic    = PCAPNG_BYTEORDER_MAGIC_NUMBER;
-    pcapng_file_header.version_major       = 0x0001;
-    pcapng_file_header.version_minor       = 0x0000;
-    pcapng_file_header.section_length      = -1; /* not specified */
-
-    //Init the common interface block
-    pcapng_interface_desc_block.header.type =
-      PCAPNG_INTERFACE_DESCRIPTION_BLOCK_TYPE;
-    pcapng_interface_desc_block.header.block_length =
-      sizeof(struct pcapng_interface_description_block) + sizeof(uint32_t);
-    pcapng_interface_desc_block.link_type = DPDKCAP_PCAP_LINK_TYPE_ETHERNET;
-    pcapng_interface_desc_block.reserved = 0;
-    pcapng_interface_desc_block.snaplen  = config->snaplen;
-
-    //Write pcapng section block header
-    written = file_write_func(write_buffer,
-        (unsigned char *) &pcapng_file_header,
-        sizeof(struct pcapng_section_header_block));
-    if(unlikely(written<0)) {
-      retval = -1;
-      goto cleanup;
-    }
-    file_size = written;
-
-    //Write pcapng section block size
-    written = file_write_func(write_buffer,
-        (unsigned char *) &(pcapng_file_header.header.block_length),
-        sizeof(uint32_t));
-    if(unlikely(written<0)) {
-      retval = -1;
-      goto cleanup;
-    }
-    file_size += written;
-
-    //Write pcapng interface description block
-    written = file_write_func(write_buffer,
-        (unsigned char *) &(pcapng_interface_desc_block),
-        sizeof(struct pcapng_interface_description_block));
-    if(unlikely(written<0)) {
-      retval = -1;
-      goto cleanup;
-    }
-    file_size += written;
-
-    //Write pcapng interface description block size
-    written = file_write_func(write_buffer,
-        (unsigned char *)
-        &(pcapng_interface_desc_block.header.block_length),
-        sizeof(uint32_t));
-    if(unlikely(written<0)) {
-      retval = -1;
-      goto cleanup;
-    }
-    file_size += written;
-  } else {
-    //Init the common pcap header
-    pcap_file_header.magic_number  = PCAP_MAGIC_NUMBER;
-    pcap_file_header.version_major = 0x0002;
-    pcap_file_header.version_minor = 0x0004;
-    pcap_file_header.thiszone      = 0;
-    pcap_file_header.sigfigs       = 0;
-    pcap_file_header.snaplen       = config->snaplen;
-    pcap_file_header.network       = DPDKCAP_PCAP_LINK_TYPE_ETHERNET;
-
-    //Write pcap header
-    written = file_write_func(write_buffer,
-        (unsigned char *) &pcap_file_header,
-        sizeof(struct pcap_header));
-    if(unlikely(written<0)) {
-      retval = -1;
-      goto cleanup;
-    }
-    file_size = written;
+  //Write pcap header
+  written = file_write_func(write_buffer, (unsigned char *) &pcp, sizeof(struct pcap_header));
+  if(unlikely(written<0)) {
+    retval = -1;
+    goto cleanup;
   }
+  file_size = written;
 
   //Log
   RTE_LOG(INFO, DPDKCAP, "Core %d is writing using file template: %s.\n",
@@ -309,23 +235,12 @@ int write_core(const struct core_write_config * config) {
 
     //Get packets from the ring
 #if RTE_VERSION >= RTE_VERSION_NUM(17,5,0,16)
-    to_write = rte_ring_dequeue_bulk(config->ring, (void*) dequeued,
-        DPDKCAP_WRITE_BURST_SIZE, NULL);
-#else
-    to_write = rte_ring_dequeue_bulk(config->ring, (void*) dequeued,
-        DPDKCAP_WRITE_BURST_SIZE);
-#endif
-    if (likely(to_write==0)) {
-      to_write = DPDKCAP_WRITE_BURST_SIZE;
-    } else {
-#if RTE_VERSION >= RTE_VERSION_NUM(17,5,0,16)
       to_write = rte_ring_dequeue_burst(config->ring, (void*)dequeued,
           DPDKCAP_WRITE_BURST_SIZE, NULL);
 #else
       to_write = rte_ring_dequeue_burst(config->ring, (void*)dequeued,
           DPDKCAP_WRITE_BURST_SIZE);
 #endif
-    }
 
     //Update stats
     config->stats->packets += to_write;
@@ -342,7 +257,6 @@ int write_core(const struct core_write_config * config) {
 
       //Get time
       gettimeofday(&tv, NULL);
-      tv64 = (uint64_t) tv.tv_usec + 1000000 * (uint64_t) tv.tv_sec;
 
       //Create a new file according to limits
       file_changed = 0;
@@ -360,7 +274,7 @@ int write_core(const struct core_write_config * config) {
       //Open new file
       if(file_changed) {
         //Change file name
-        format_from_template(file_name, config->output_file_template,
+        format_from_template(file_name, config->output_file_template, config->port,
             rte_lcore_id(), file_count, &file_start);
 
         //Update stats
@@ -379,100 +293,37 @@ int write_core(const struct core_write_config * config) {
           goto cleanup;
         }
 
-        if(config->use_pcapng) {
-          //Write pcapng section block header
-          written = file_write_func(write_buffer,
-              (unsigned char *) &pcapng_file_header,
-              sizeof(struct pcapng_section_header_block));
-          if(unlikely(written<0)) {
-            retval = -1;
-            goto cleanup;
-          }
-          file_size = written;
-
-          //Write pcapng section block size
-          written = file_write_func(write_buffer,
-              (unsigned char *) &(pcapng_file_header.header.block_length),
-              sizeof(uint32_t));
-          if(unlikely(written<0)) {
-            retval = -1;
-            goto cleanup;
-          }
-          file_size += written;
-
-          //Write pcapng interface description block
-          written = file_write_func(write_buffer,
-              (unsigned char *) &(pcapng_interface_desc_block),
-              sizeof(struct pcapng_interface_description_block));
-          if(unlikely(written<0)) {
-            retval = -1;
-            goto cleanup;
-          }
-          file_size += written;
-
-          //Write pcapng interface description block size
-          written = file_write_func(write_buffer,
-              (unsigned char *)
-              &(pcapng_interface_desc_block.header.block_length),
-              sizeof(uint32_t));
-          if(unlikely(written<0)) {
-            retval = -1;
-            goto cleanup;
-          }
-          file_size += written;
-        } else {
-          //Write pcap header
-          written = file_write_func(write_buffer,
-              (unsigned char *) &pcap_file_header,
-              sizeof(struct pcap_header));
-          if(unlikely(written<0)) {
-            retval = -1;
-            goto cleanup;
-          }
-          file_size = written;
-        }
-      }
-
-
-      //Write packet header
-      if(config->use_pcapng) {
-        pcapng_pkt_header.header.type = PCAPNG_ENHANCED_PACKET_BLOCK_TYPE;
-        pcapng_pkt_header.header.block_length =
-          sizeof(struct pcapng_enhanced_packet_block) +
-          packet_length +
-          (sizeof(uint32_t) - packet_length % sizeof(uint32_t)) +
-          sizeof(uint32_t);
-        pcapng_pkt_header.interface_id = 0;
-        pcapng_pkt_header.timestamp_high = (uint32_t) (tv64 >> 32);
-        pcapng_pkt_header.timestamp_low = (uint32_t) tv64;
-        pcapng_pkt_header.captured_packet_len = packet_length;
-        pcapng_pkt_header.original_packet_len = wire_packet_length;
-        written = file_write_func(write_buffer, &pcapng_pkt_header,
-            sizeof(struct pcapng_enhanced_packet_block));
-        if (unlikely(written<0)) {
+        //Write pcap header
+        written = file_write_func(write_buffer, &pcp,
+            sizeof(struct pcap_header));
+        if(unlikely(written<0)) {
           retval = -1;
           goto cleanup;
         }
-        file_size += written;
-      } else {
-        pcap_pkt_header.timestamp = (uint32_t) tv.tv_sec;
-        pcap_pkt_header.microseconds = (uint32_t) tv.tv_usec;
-        pcap_pkt_header.packet_length = packet_length;
-        pcap_pkt_header.packet_length_wire = wire_packet_length;
-        written = file_write_func(write_buffer, &pcap_pkt_header,
-            sizeof(struct pcap_packet_header));
-        if (unlikely(written<0)) {
-          retval = -1;
-          goto cleanup;
-        }
-        file_size += written;
+        //Reset file size
+        file_size = written;
       }
+
+      //Write block header
+      header.timestamp = (int32_t) tv.tv_sec;
+      header.microseconds = (int32_t) tv.tv_usec;
+      header.packet_length = MIN(packet_length,pkt_strip_len);
+      header.packet_length_wire = wire_packet_length;
+      written = file_write_func(write_buffer, &header,
+          sizeof(struct pcap_packet_header));
+      if (unlikely(written<0)) {
+        retval = -1;
+        goto cleanup;
+      }
+      file_size += written;
 
       //Write content
-      remaining_bytes = packet_length;
+      //remaining_bytes = packet_length;
+      remaining_bytes = pkt_strip_len;
       compressed_length = 0;
       while (bufptr != NULL && remaining_bytes > 0) {
         bytes_to_write = MIN(rte_pktmbuf_data_len(bufptr), remaining_bytes);
+        //bytes_to_write = MIN(bytes_to_write,100);
         written = file_write_func(write_buffer,
             rte_pktmbuf_mtod(bufptr, void*),
             bytes_to_write);
@@ -486,36 +337,14 @@ int write_core(const struct core_write_config * config) {
         file_size += written;
       }
 
-      if(config->use_pcapng) {
-        // Write block padding
-        written = file_write_func(write_buffer,
-            &(padding_char),
-            (sizeof(uint32_t) - packet_length % sizeof(uint32_t)));
-        if (unlikely(written<0)) {
-          retval = -1;
-          goto cleanup;
-        }
-        file_size += written;
-
-        // Write block length
-        written = file_write_func(write_buffer,
-            &(pcapng_pkt_header.header.block_length),
-            sizeof(uint32_t));
-        if (unlikely(written<0)) {
-          retval = -1;
-          goto cleanup;
-        }
-        file_size += written;
-      }
-
       //Free buffer
       rte_pktmbuf_free(dequeued[i]);
 
       //Update stats
-      config->stats->bytes += packet_length;
+      config->stats->bytes += MIN(packet_length,pkt_strip_len);
       config->stats->compressed_bytes += compressed_length;
       config->stats->current_file_packets ++;
-      config->stats->current_file_bytes += packet_length;
+      config->stats->current_file_bytes += MIN(packet_length,pkt_strip_len);
       config->stats->current_file_compressed_bytes = file_size;
 
     }
